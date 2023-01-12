@@ -87,7 +87,7 @@ type alias TouchData =
     , idm : String
     , zoneName : String     -- Zone
     , data : Maybe String   -- Icカードの残高
-    , createdAt : Int       -- Posix
+    , createdAt : Int       -- Posix(Int)
     }
 
 defaultTouchLog =
@@ -340,13 +340,16 @@ update msg model =
                         |> Maybe.Extra.unwrap (Just millis) (always Nothing)
             in
             ( model
-            , Just insertTouchCmd
-                |> Maybe.Extra.andMap touch.idm
-                |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
-                |> Maybe.Extra.andMap zoneName
-                |> Maybe.Extra.andMap (validateTime millis)
-                |> Maybe.Extra.andMap model.dbh
-                |> Maybe.withDefault Cmd.none
+            , Cmd.batch
+                [ observeTouchCmd model.config
+                , Just insertTouchCmd
+                    |> Maybe.Extra.andMap touch.idm
+                    |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
+                    |> Maybe.Extra.andMap zoneName
+                    |> Maybe.Extra.andMap (validateTime millis)
+                    |> Maybe.Extra.andMap model.dbh
+                    |> Maybe.withDefault Cmd.none
+                ]
             )
 
         GotSetting setting ->
@@ -355,7 +358,10 @@ update msg model =
                     configFromSetting setting
             in
             ( { model | config = config }
-            , createTableCmd
+            , Cmd.batch
+                [ observeTouchCmd model.config
+                , createTableCmd
+                ]
             )
 
         GotDBHandle dbh ->
@@ -374,11 +380,8 @@ update msg model =
 
         SQLDone dbh ->
             ( model
-            , Cmd.batch
-                [ observeTouchCmd model.config
-                , Maybe.map selectAllTouchCmd model.dbh
-                    |> Maybe.withDefault Cmd.none
-                ]
+            , Maybe.map selectAllTouchCmd model.dbh
+                |> Maybe.withDefault Cmd.none
             )
 
 
