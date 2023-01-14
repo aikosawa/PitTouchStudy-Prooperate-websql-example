@@ -340,16 +340,13 @@ update msg model =
                         |> Maybe.Extra.unwrap (Just millis) (always Nothing)
             in
             ( model
-            , Cmd.batch
-                [ observeTouchCmd model.config
-                , Just insertTouchCmd
-                    |> Maybe.Extra.andMap touch.idm
-                    |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
-                    |> Maybe.Extra.andMap zoneName
-                    |> Maybe.Extra.andMap (validateTime millis)
-                    |> Maybe.Extra.andMap model.dbh
-                    |> Maybe.withDefault Cmd.none
-                ]
+            , Just insertTouchCmd
+                |> Maybe.Extra.andMap touch.idm
+                |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
+                |> Maybe.Extra.andMap zoneName
+                |> Maybe.Extra.andMap (validateTime millis)
+                |> Maybe.Extra.andMap model.dbh
+                |> Maybe.withDefault Cmd.none
             )
 
         GotSetting setting ->
@@ -380,8 +377,11 @@ update msg model =
 
         SQLDone dbh ->
             ( model
-            , Maybe.map selectAllTouchCmd model.dbh
-                |> Maybe.withDefault Cmd.none
+            , Cmd.batch
+                [ observeTouchCmd model.config
+                , Maybe.map selectAllTouchCmd model.dbh
+                    |> Maybe.withDefault Cmd.none
+                ]
             )
 
 
