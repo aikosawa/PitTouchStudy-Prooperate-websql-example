@@ -274,7 +274,8 @@ selectAllTouchCmd dbh =
             (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
 
 -- TouchData DataBase 操作関数
-
+-- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
+-- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
 
 
 -- UPDATE
@@ -386,6 +387,29 @@ update msg model =
 
 
 -- 入室、退室数計算 from DateBase
+-- 入室、退室数計算
+groupEachIdm data =
+    Dict.Extra.groupBy .idm data
+        |> Dict.map (\_ v -> List.length v )
+{-| 
+@docs Dict [(idm, [{userTouchData}])]
+@docs Dict [(idm, dataLength)]
+-}
+     
+transformToCounts data =
+    Dict.map (\_ v -> (( v + 1 )//2, v//2)) data
+{-| 入退室カウント取得
+@docs Dict [(idm, (入室回数, 退室回数))]
+ -}
+totalEntExiCount data =
+    Dict.values data
+        |> List.unzip
+        |> Tuple.mapBoth List.sum List.sum
+{-|
+@docs [(入室回数, 退室回数)]
+@docs ([入室回数], [退室回数])
+@docs (入室総数, 退室総数)
+ -}
 
 
 
@@ -429,13 +453,79 @@ view model =
                 |> Maybe.withDefault 0
         
         -- 入退室カウント表示用 from DataBase
-        
+        entryTimes : List TouchData -> String
+        entryTimes data = 
+            groupEachIdm data
+                |> transformToCounts
+                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
+                |> Maybe.map Tuple.first
+                |> Maybe.withDefault 0
+                |> String.fromInt
+
+        exitTimes : List TouchData -> String
+        exitTimes data =
+            groupEachIdm data
+                |> transformToCounts
+                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
+                |> Maybe.map Tuple.second
+                |> Maybe.withDefault 0
+                |> String.fromInt
+
+        totalTouchCounts : List TouchData -> String
+        totalTouchCounts data =
+            groupEachIdm data
+                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
+                |> Maybe.withDefault 0
+                |> String.fromInt
+
+        entredNumbers : List TouchData -> String
+        entredNumbers logs =
+            groupEachIdm logs
+                |> transformToCounts
+                |> totalEntExiCount
+                |> Tuple.first
+                |> String.fromInt
+
+        exitedNumbers : List TouchData -> String
+        exitedNumbers data =
+            groupEachIdm data
+                |> transformToCounts
+                |> totalEntExiCount
+                |> Tuple.second
+                |> String.fromInt
+
+        viewTouchData : Maybe TouchData -> Html msg
+        viewTouchData maybeData =
+            let
+                data = Maybe.withDefault defaultTouchLog maybeData
+            in
+            li [] [ text <| "IDM : " ++ data.idm ++ " TIME : " ++ (formatTime maybeData) ]
+
+        lastFiveEnteredPeople : List TouchData -> List String
+        lastFiveEnteredPeople data =
+            List.reverse data
+                |> groupEachIdm
+                |> Dict.toList
+                |> List.take 4
+                |> List.unzip
+                |> Tuple.first
+
+        viewLastFiveEnteredPeople : String -> Html msg
+        viewLastFiveEnteredPeople data =
+            li [] [ text <| "IDM : " ++ data ]
     in
     div [ id "body" ]
         [ div [] [ p [] [ text "Main" ] ]
         , div [] [ p [] [ text idmText ] ]
         , div [] [ p [] [ text <| formatTime model.lastTouchLog ] ]
         , div [] [ p [] [ text <| String.fromInt deposit ] ]
+        , div [] [ p [] [ text <| "Enter : " ++ entryTimes model.touchLogs ++ " times "
+                        , text <| "Exit : " ++ exitTimes model.touchLogs ++ " times "
+                        , text <| "Total Counts : " ++ totalTouchCounts model.touchLogs ++ " times "
+                        ]]
+        , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
+                        , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
+        , div [] [ ul [] ( List.map viewLastFiveEnteredPeople (lastFiveEnteredPeople model.touchLogs)) ]
         ]
 
 
