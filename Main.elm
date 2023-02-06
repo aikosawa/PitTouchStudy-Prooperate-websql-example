@@ -88,6 +88,7 @@ type alias TouchData =
     , zoneName : String     -- Zone
     , data : Maybe String   -- Icカードの残高
     , createdAt : Int       -- Posix(Int)
+    , count : Int           -- 入退室カウント用
     }
 
 defaultTouchLog =
@@ -96,8 +97,8 @@ defaultTouchLog =
     , zoneName = ""
     , data = Nothing
     , createdAt = 0
+    , count = 0
     }
-
 
 type alias Flags =
     {}
@@ -265,6 +266,7 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
                 |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
+                |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
 
         decoder =
             Json.Decode.list touchDecoder
@@ -274,6 +276,38 @@ selectAllTouchCmd dbh =
             (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
 
 -- TouchData DataBase 操作関数
+
+-- IDM, ZONENAME, CREATED, COUNT(IDM), STATUS(IN/OUT) つけてクエリしたやつ。IN/OUT が付くのでこの後自分で計算して出力する必要がない
+-- SELECT IDM, ZONENAME, CREATED, CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as STATUS,
+-- COUNT (IDM) as COUNT FROM TOUCH GROUP BY IDM;
+
+selectLatestWithCount : String -> String -> Cmd Msg
+selectLatestWithCount idm dbh =
+    let
+        andMap =
+            Json.Decode.Extra.andMap
+
+        sql =
+            """
+            SELECT IDM, ZONENAME, CREATED, MAX(CREATED), COUNT(IDM) FROM TOUCH WHERE IDM = ?;
+            """
+
+        touchDecoder =
+            Json.Decode.succeed TouchData
+                |> andMap (Json.Decode.field "ID" Json.Decode.int)
+                |> andMap (Json.Decode.field "IDM" Json.Decode.string)
+                |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
+                |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
+                |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
+                |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
+
+        decoder =
+            Json.Decode.list touchDecoder
+    in
+    WebSQL.querySQL decoder sql [idm] dbh
+        |> Procedure.try ProcMsg
+            (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
+
 -- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
 -- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
 
@@ -290,6 +324,13 @@ filterTouchLogsByMSec : Int -> List TouchData -> List TouchData
 filterTouchLogsByMSec createdAt =
     List.filter (\a -> a.createdAt > createdAt)
 
+
+
+-- -> ProcMsg
+-- -> OnError
+-- -> OnTouch -> OnTouchWithTime　-> SQLDone　-> SQLAllTouch
+-- -> GotSetting-> GotDBHandle
+-- -> GotDBHandle -> SQLDone　-> SQLAllTouch
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
@@ -345,6 +386,8 @@ update msg model =
                     |> Maybe.Extra.andMap zoneName
                     |> Maybe.Extra.andMap (validateTime millis)
                     |> Maybe.Extra.andMap model.dbh
+                    |> Maybe.withDefault Cmd.none
+                , Maybe.map2 selectLatestWithCount touch.idm model.dbh
                     |> Maybe.withDefault Cmd.none
                 ]
             )
