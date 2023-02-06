@@ -67,6 +67,7 @@ type Msg
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
     | OnTouchWithTime TouchResponse (Maybe String) Int
+-- Msg追加する
 
 
 
