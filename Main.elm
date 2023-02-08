@@ -79,6 +79,7 @@ type alias Model =
     , dbh : Maybe String
     , touchLogs : List TouchData
     , lastTouchLog : Maybe TouchData
+    , touchLogWithCount : TouchData
     }
 
 
