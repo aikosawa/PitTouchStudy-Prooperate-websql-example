@@ -67,7 +67,6 @@ type Msg
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
     | OnTouchWithTime TouchResponse (Maybe String) Int
--- Msg追加する
 
 
 
@@ -257,7 +256,7 @@ selectAllTouchCmd dbh =
 
         sql =
             """
-            SELECT * FROM TOUCH ORDER BY CREATED DESC;
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, COUNT(IDM) AS COUNT FROM TOUCH ORDER BY CREATED DESC;
             """
 
         touchDecoder =
@@ -290,7 +289,7 @@ selectLatestWithCount idm dbh =
 
         sql =
             """
-            SELECT IDM, ZONENAME, CREATED, MAX(CREATED), COUNT(IDM) FROM TOUCH WHERE IDM = ?;
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, COUNT(IDM) AS COUNT, MAX(CREATED) FROM TOUCH WHERE IDM = ?;
             """
 
         touchDecoder =
@@ -420,7 +419,9 @@ update msg model =
             )
 
         SQLDone dbh ->
-            ( model
+            ( { model
+                | 
+            }
             , Maybe.map selectAllTouchCmd model.dbh
                 |> Maybe.withDefault Cmd.none
             )
