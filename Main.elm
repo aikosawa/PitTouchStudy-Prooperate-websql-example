@@ -66,7 +66,7 @@ type Msg
     | SQLAllTouch (List TouchData)
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
-    | OnTouchWithTime TouchResponse (Maybe String) Int
+    | OnTouchWithTime TouchResponse (Maybe String) Int TouchData
 
 
 
@@ -116,6 +116,7 @@ init _ =
       , dbh = Nothing
       , touchLogs = []
       , lastTouchLog = Nothing
+      , touchLogWithCount = defaultTouchLog
       }
     , getProviderSettingCmd
     )
@@ -271,6 +272,7 @@ selectAllTouchCmd dbh =
 
         decoder =
             Json.Decode.list touchDecoder
+
     in
     WebSQL.querySQL decoder sql [] dbh
         |> Procedure.try ProcMsg
@@ -282,8 +284,8 @@ selectAllTouchCmd dbh =
 -- SELECT IDM, ZONENAME, CREATED, CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as STATUS,
 -- COUNT (IDM) as COUNT FROM TOUCH GROUP BY IDM;
 
-selectLatestWithCount : String -> String -> Cmd Msg
-selectLatestWithCount idm dbh =
+selectAllSQL : String -> String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
+selectAllSQL idm dbh touch zoneName millis =
     let
         andMap =
             Json.Decode.Extra.andMap
@@ -304,10 +306,20 @@ selectLatestWithCount idm dbh =
 
         decoder =
             Json.Decode.list touchDecoder
+
+        proAndMap =
+            Procedure.map2 (|>)
+
+        withoutSQL = 
+            Procedure.provide OnTouchWithTime
+                |> proAndMap (Procedure.provide touch)
+                |> proAndMap (Procedure.provide zoneName)
+                |> proAndMap (Procedure.provide millis)
+        
     in
     WebSQL.querySQL decoder sql [idm] dbh
         |> Procedure.try ProcMsg
-            (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
+            (Result.Extra.unpack (OnError << WebSQLError) withoutSQL)
 
 -- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
 -- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
@@ -361,15 +373,26 @@ update msg model =
                     TimeZone.getZone
                         |> Task.map (Just << Tuple.first)
                         |> Task.onError ((always << Task.succeed) Nothing)
+                
+                -- onTouch = 
+                --     Task.succeed (OnTouchWithTime touch)
+                --         |> andMap getZoneName
+                --         |> andMap (Task.map Time.posixToMillis Time.now)
             in
             ( model
-            , Task.succeed (OnTouchWithTime touch)
-                |> andMap getZoneName
-                |> andMap (Task.map Time.posixToMillis Time.now)
-                |> Task.perform identity
+            , Just selectAllSQL
+                |> Maybe.Extra.andMap touch.idm
+                |> Maybe.Extra.andMap model.dbh
+                |> Maybe.Extra.andMap (Just touch)
+                |> Maybe.Extra.andMap (Just getZoneName)
+                |> Maybe.Extra.andMap (Just (Task.map Time.posixToMillis Time.now))
+                |> Maybe.withDefault Cmd.none
+            -- Maybe.map2 selectAllSQL touch.idm model.dbh touch getZoneName (Task.map Time.posixToMillis Time.now)
+            --     |> Maybe.withDefault Cmd.none
+            -- touch以前で10秒以内があったら何もしない(touchの内容持ってってDB称号(Posix(ms - 10 * 1000)True False)touchの比較)
             )
 
-        OnTouchWithTime touch zoneName millis ->
+        OnTouchWithTime touch zoneName millis touchLogWithCount ->
             let
                 validateTime ms =   -- 10秒はじく from DataBase
                     Maybe.map2 filterTouchLogsByIdm touch.idm (Just model.touchLogs)
@@ -387,8 +410,6 @@ update msg model =
                     |> Maybe.Extra.andMap zoneName
                     |> Maybe.Extra.andMap (validateTime millis)
                     |> Maybe.Extra.andMap model.dbh
-                    |> Maybe.withDefault Cmd.none
-                , Maybe.map2 selectLatestWithCount touch.idm model.dbh
                     |> Maybe.withDefault Cmd.none
                 ]
             )
@@ -420,12 +441,11 @@ update msg model =
             )
 
         SQLDone dbh ->
-            ( { model
-                | 
-            }
+            ( model
             , Maybe.map selectAllTouchCmd model.dbh
                 |> Maybe.withDefault Cmd.none
             )
+            
 
 
 
