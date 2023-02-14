@@ -66,7 +66,8 @@ type Msg
     | SQLAllTouch (List TouchData)
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
-    | OnTouchWithTime TouchResponse (Maybe String) Int TouchData
+    | OnTouchWithTime TouchResponse (Maybe String) Int
+    | GotCurrentInOut TouchResponse (Maybe String) Int TouchData
 
 
 
@@ -89,6 +90,8 @@ type alias TouchData =
     , zoneName : String     -- Zone
     , data : Maybe String   -- Icカードの残高
     , createdAt : Int       -- Posix(Int)
+    , status : String       -- 入室/退室しているか
+    , tensec : Bool       -- 10秒以内のものがあるか
     , count : Int           -- 入退室カウント用
     }
 
@@ -98,6 +101,8 @@ defaultTouchLog =
     , zoneName = ""
     , data = Nothing
     , createdAt = 0
+    , status = ""
+    , tensec = False
     , count = 0
     }
 
@@ -268,6 +273,8 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
                 |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
+                |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
+                |> andMap (Json.Decode.field "TENSEC" Json.Decode.bool)
                 |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
 
         decoder =
@@ -284,42 +291,38 @@ selectAllTouchCmd dbh =
 -- SELECT IDM, ZONENAME, CREATED, CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as STATUS,
 -- COUNT (IDM) as COUNT FROM TOUCH GROUP BY IDM;
 
-selectAllSQL : String -> String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
-selectAllSQL idm dbh touch zoneName millis =
+selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
+selectLatestRecordWithin10Secs dbh touch millis =
     let
-        andMap =
-            Json.Decode.Extra.andMap
-
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, COUNT(IDM) AS COUNT, MAX(CREATED) FROM TOUCH WHERE IDM = ?;
+            SELECT IDM, ZONENAME, CREATED,
+            CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
+            CASE WHEN CREATED > ?(posix) + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
+            COUNT (IDM) as COUNT FROM TOUCH WHERE IDM = ?(idm);
             """
 
         touchDecoder =
             Json.Decode.succeed TouchData
-                |> andMap (Json.Decode.field "ID" Json.Decode.int)
-                |> andMap (Json.Decode.field "IDM" Json.Decode.string)
-                |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
-                |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
-                |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
-                |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "ID" Json.Decode.int)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "IDM" Json.Decode.string)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
+                |> Json.Decode.Extra.andMap (Json.Decode.field "CREATED" Json.Decode.int)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "STATUS" Json.Decode.string)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "TENSEC" Json.Decode.bool)
+                |> Json.Decode.Extra.andMap (Json.Decode.field "COUNT" Json.Decode.int)
 
         decoder =
             Json.Decode.list touchDecoder
 
-        proAndMap =
+        andMap =
             Procedure.map2 (|>)
-
-        withoutSQL = 
-            Procedure.provide OnTouchWithTime
-                |> proAndMap (Procedure.provide touch)
-                |> proAndMap (Procedure.provide zoneName)
-                |> proAndMap (Procedure.provide millis)
-        
     in
-    WebSQL.querySQL decoder sql [idm] dbh
+
+    WebSQL.querySQL decoder sql [millis, idm] dbh
         |> Procedure.try ProcMsg
-            (Result.Extra.unpack (OnError << WebSQLError) withoutSQL)
+            (Result.Extra.unpack (OnError << WebSQLError) GotCurrentInOut)
 
 -- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
 -- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
@@ -373,46 +376,34 @@ update msg model =
                     TimeZone.getZone
                         |> Task.map (Just << Tuple.first)
                         |> Task.onError ((always << Task.succeed) Nothing)
-                
-                -- onTouch = 
-                --     Task.succeed (OnTouchWithTime touch)
-                --         |> andMap getZoneName
-                --         |> andMap (Task.map Time.posixToMillis Time.now)
             in
             ( model
-            , Just selectAllSQL
-                |> Maybe.Extra.andMap touch.idm
-                |> Maybe.Extra.andMap model.dbh
-                |> Maybe.Extra.andMap (Just touch)
-                |> Maybe.Extra.andMap (Just getZoneName)
-                |> Maybe.Extra.andMap (Just (Task.map Time.posixToMillis Time.now))
-                |> Maybe.withDefault Cmd.none
-            -- Maybe.map2 selectAllSQL touch.idm model.dbh touch getZoneName (Task.map Time.posixToMillis Time.now)
-            --     |> Maybe.withDefault Cmd.none
-            -- touch以前で10秒以内があったら何もしない(touchの内容持ってってDB称号(Posix(ms - 10 * 1000)True False)touchの比較)
+            , Task.succeed (OnTouchWithTime touch)
+                |> andMap getZoneName
+                |> andMap Time.now
+                |> Task.perform identity
             )
 
-        OnTouchWithTime touch zoneName millis touchLogWithCount ->
-            let
-                validateTime ms =   -- 10秒はじく from DataBase
-                    Maybe.map2 filterTouchLogsByIdm touch.idm (Just model.touchLogs)
-                        |> Maybe.map (filterTouchLogsByMSec (ms - 10 * 1000))
-                        |> Maybe.map (List.sortBy (.createdAt >> (-) ms))
-                        |> Maybe.andThen List.head
-                        |> Maybe.Extra.unwrap (Just millis) (always Nothing)
-            in
+        OnTouchWithTime touch zoneName millis ->
             ( model
             , Cmd.batch
                 [ observeTouchCmd model.config
-                , Just insertTouchCmd
-                    |> Maybe.Extra.andMap touch.idm
-                    |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
-                    |> Maybe.Extra.andMap zoneName
-                    |> Maybe.Extra.andMap (validateTime millis)
-                    |> Maybe.Extra.andMap model.dbh
+                , Maybe.map3 selectLatestRecordWithin10Secs model.dbh touch millis
                     |> Maybe.withDefault Cmd.none
+                    -- touch以前で10秒以内があったら何もしない(touchの内容持ってってDB称号(Posix(ms - 10 * 1000)True False)touchの比較)
                 ]
             )
+
+        GotCurrentInOut touch zoneName millis touchLog ->
+            ( model
+            , Just insertTouchCmd
+                |> Maybe.Extra.andMap touch.idm
+                |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
+                |> Maybe.Extra.andMap zoneName
+                |> Maybe.Extra.andMap (millis)
+                |> Maybe.Extra.andMap model.dbh
+                |> Maybe.withDefault Cmd.none
+                )
 
         GotSetting setting ->
             let
