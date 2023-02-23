@@ -292,14 +292,14 @@ selectAllTouchCmd dbh =
 -- COUNT (IDM) as COUNT FROM TOUCH GROUP BY IDM;
 
 selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
-selectLatestRecordWithin10Secs dbh touch millis =
+selectLatestRecordWithin10Secs dbh touch zoneName millis =
     let
         sql =
             """
             SELECT IDM, ZONENAME, CREATED,
             CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
-            CASE WHEN CREATED > ?(posix) + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
-            COUNT (IDM) as COUNT FROM TOUCH WHERE IDM = ?(idm);
+            CASE WHEN CREATED > ? + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
+            COUNT (IDM) as COUNT FROM TOUCH WHERE IDM = ?;
             """
 
         touchDecoder =
@@ -318,11 +318,15 @@ selectLatestRecordWithin10Secs dbh touch millis =
 
         andMap =
             Procedure.map2 (|>)
-    in
 
-    WebSQL.querySQL decoder sql [millis, idm] dbh
-        |> Procedure.try ProcMsg
-            (Result.Extra.unpack (OnError << WebSQLError) GotCurrentInOut)
+        msgGotCurrentInOut =
+            Procedure.provide GotCurrentInOut
+                |> andMap (Procedure.provide touch)
+                |> andMap (Procedure.provide zoneName)
+                |> andMap (Procedure.provide millis)
+    in
+    WebSQL.querySQL decoder sql [millis, (Maybe.withDefault "" touch.idm)] dbh
+        |> Procedure.try ProcMsg (Result.Extra.unpack (OnError << WebSQLError) msgGotCurrentInOut)
 
 -- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
 -- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
@@ -380,7 +384,7 @@ update msg model =
             ( model
             , Task.succeed (OnTouchWithTime touch)
                 |> andMap getZoneName
-                |> andMap Time.now
+                |> andMap (Task.map Time.posixToMillis Time.now)
                 |> Task.perform identity
             )
 
@@ -388,7 +392,11 @@ update msg model =
             ( model
             , Cmd.batch
                 [ observeTouchCmd model.config
-                , Maybe.map3 selectLatestRecordWithin10Secs model.dbh touch millis
+                , Just selectLatestRecordWithin10Secs 
+                    |> Maybe.Extra.andMap model.dbh
+                    |> Maybe.Extra.andMap (Just touch)
+                    |> Maybe.Extra.andMap (Just zoneName)
+                    |> Maybe.Extra.andMap (Just millis)
                     |> Maybe.withDefault Cmd.none
                     -- touch以前で10秒以内があったら何もしない(touchの内容持ってってDB称号(Posix(ms - 10 * 1000)True False)touchの比較)
                 ]
@@ -400,7 +408,7 @@ update msg model =
                 |> Maybe.Extra.andMap touch.idm
                 |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
                 |> Maybe.Extra.andMap zoneName
-                |> Maybe.Extra.andMap (millis)
+                |> Maybe.Extra.andMap (Just millis)
                 |> Maybe.Extra.andMap model.dbh
                 |> Maybe.withDefault Cmd.none
                 )
