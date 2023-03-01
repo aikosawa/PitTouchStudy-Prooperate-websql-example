@@ -67,7 +67,7 @@ type Msg
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
     | OnTouchWithTime TouchResponse (Maybe String) Int
-    | GotCurrentInOut TouchResponse (Maybe String) Int TouchData
+    | GotCurrentInOut TouchResponse (Maybe String) Int (List TouchData)
 
 
 
@@ -80,7 +80,7 @@ type alias Model =
     , dbh : Maybe String
     , touchLogs : List TouchData
     , lastTouchLog : Maybe TouchData
-    , touchLogWithCount : TouchData
+    , touchLogWithCount : List TouchData
     }
 
 
@@ -121,7 +121,7 @@ init _ =
       , dbh = Nothing
       , touchLogs = []
       , lastTouchLog = Nothing
-      , touchLogWithCount = defaultTouchLog
+      , touchLogWithCount = []
       }
     , getProviderSettingCmd
     )
@@ -283,7 +283,7 @@ selectAllTouchCmd dbh =
     in
     WebSQL.querySQL decoder sql [] dbh
         |> Procedure.try ProcMsg
-            (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
+            (Result.Extra.unpack (WebSQLError >> OnError) SQLAllTouch)
 
 -- TouchData DataBase 操作関数
 
@@ -319,14 +319,11 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
         andMap =
             Procedure.map2 (|>)
 
-        msgGotCurrentInOut =
-            Procedure.provide GotCurrentInOut
-                |> andMap (Procedure.provide touch)
-                |> andMap (Procedure.provide zoneName)
-                |> andMap (Procedure.provide millis)
+        createdAt =
+            String.fromInt millis
     in
-    WebSQL.querySQL decoder sql [millis, (Maybe.withDefault "" touch.idm)] dbh
-        |> Procedure.try ProcMsg (Result.Extra.unpack (OnError << WebSQLError) msgGotCurrentInOut)
+    WebSQL.querySQL decoder sql [ createdAt, (Maybe.withDefault "" touch.idm )] dbh
+        |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) (GotCurrentInOut touch zoneName millis))
 
 -- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
 -- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
@@ -403,7 +400,7 @@ update msg model =
             )
 
         GotCurrentInOut touch zoneName millis touchLog ->
-            ( model
+            ( { model | touchLogWithCount = touchLog }
             , Just insertTouchCmd
                 |> Maybe.Extra.andMap touch.idm
                 |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
