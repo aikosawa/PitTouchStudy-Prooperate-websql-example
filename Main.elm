@@ -91,7 +91,6 @@ type alias TouchData =
     , data : Maybe String   -- Icカードの残高
     , createdAt : Int       -- Posix(Int)
     , status : String       -- 入室/退室しているか
-    , tensec : Bool       -- 10秒以内のものがあるか
     , count : Int           -- 入退室カウント用
     }
 
@@ -102,7 +101,6 @@ defaultTouchLog =
     , data = Nothing
     , createdAt = 0
     , status = ""
-    , tensec = False
     , count = 0
     }
 
@@ -263,7 +261,7 @@ selectAllTouchCmd dbh =
 
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, COUNT(IDM) AS COUNT FROM TOUCH ORDER BY CREATED DESC;
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS, 0 AS COUNT FROM TOUCH ORDER BY CREATED DESC;
             """
 
         touchDecoder =
@@ -274,7 +272,6 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
                 |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
-                |> andMap (Json.Decode.field "TENSEC" Json.Decode.bool)
                 |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
 
         decoder =
@@ -296,7 +293,7 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
     let
         sql =
             """
-            SELECT IDM, ZONENAME, CREATED,
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, 
             CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
             CASE WHEN CREATED > ? + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
             COUNT (IDM) as COUNT FROM TOUCH WHERE IDM = ?;
@@ -310,7 +307,6 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
                 |> Json.Decode.Extra.andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> Json.Decode.Extra.andMap (Json.Decode.field "CREATED" Json.Decode.int)
                 |> Json.Decode.Extra.andMap (Json.Decode.field "STATUS" Json.Decode.string)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "TENSEC" Json.Decode.bool)
                 |> Json.Decode.Extra.andMap (Json.Decode.field "COUNT" Json.Decode.int)
 
         decoder =
