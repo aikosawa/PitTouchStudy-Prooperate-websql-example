@@ -511,30 +511,7 @@ view model =
                 |> Maybe.withDefault 0
         
         -- 入退室カウント表示用 from DataBase
-        entryTimes : List TouchData -> String
-        entryTimes data = 
-            groupEachIdm data
-                |> transformToCounts
-                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
-                |> Maybe.map Tuple.first
-                |> Maybe.withDefault 0
-                |> String.fromInt
 
-        exitTimes : List TouchData -> String
-        exitTimes data =
-            groupEachIdm data
-                |> transformToCounts
-                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
-                |> Maybe.map Tuple.second
-                |> Maybe.withDefault 0
-                |> String.fromInt
-
-        totalTouchCounts : List TouchData -> String
-        totalTouchCounts data =
-            groupEachIdm data
-                |> Dict.get (Maybe.withDefault defaultTouchLog (model.lastTouchLog)).idm
-                |> Maybe.withDefault 0
-                |> String.fromInt
 
         entredNumbers : List TouchData -> String
         entredNumbers logs =
@@ -577,9 +554,9 @@ view model =
         , div [] [ p [] [ text idmText ] ]
         , div [] [ p [] [ text <| formatTime model.lastTouchLog ] ]
         , div [] [ p [] [ text <| String.fromInt deposit ] ]
-        , div [] [ p [] [ text <| "Enter : " ++ entryTimes model.touchLogs ++ " times "
-                        , text <| "Exit : " ++ exitTimes model.touchLogs ++ " times "
-                        , text <| "Total Counts : " ++ totalTouchCounts model.touchLogs ++ " times "
+        , div [] [ p [] [ text <| "Enter : " ++ String.fromInt(((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count + 1) // 2)  ++ " times "
+                        , text <| "Exit : "  ++ String.fromInt((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count // 2)  ++ " times "
+                        , text <| "Total Counts : " ++ String.fromInt(Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count ++ " times "
                         ]]
         , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
                         , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
