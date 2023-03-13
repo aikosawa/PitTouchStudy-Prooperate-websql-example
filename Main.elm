@@ -92,6 +92,8 @@ type alias TouchData =
     , createdAt : Int       -- Posix(Int)
     , status : String       -- 入室/退室しているか
     , count : Int           -- 入退室カウント用
+    , incount : Int
+    , outcount : Int
     }
 
 defaultTouchLog =
@@ -102,6 +104,8 @@ defaultTouchLog =
     , createdAt = 0
     , status = ""
     , count = 0
+    , incount = 0
+    , outcount = 0
     }
 
 type alias Flags =
@@ -261,7 +265,7 @@ selectAllTouchCmd dbh =
 
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS, 0 AS COUNT FROM TOUCH ORDER BY CREATED DESC;
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS, 0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT FROM TOUCH ORDER BY CREATED DESC;
             """
 
         touchDecoder =
@@ -273,6 +277,8 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
                 |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
                 |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
+                |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
+                |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
 
         decoder =
             Json.Decode.list touchDecoder
@@ -291,29 +297,34 @@ selectAllTouchCmd dbh =
 selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
 selectLatestRecordWithin10Secs dbh touch zoneName millis =
     let
+        andMap =
+            Json.Decode.Extra.andMap
+
         sql =
             """
             SELECT ID, IDM, ZONENAME, DATA, CREATED, 
+            COUNT(IDM) / 2 AS INCOUNT,
+            (COUNT(IDM) + 1) / 2 AS OUTCOUNT, 
             CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
             CASE WHEN CREATED > ? + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
-            COUNT (IDM) as COUNT FROM TOUCH WHERE IDM = ?;
+            COUNT(IDM) as COUNT
+            FROM TOUCH WHERE IDM = idm;
             """
 
         touchDecoder =
             Json.Decode.succeed TouchData
-                |> Json.Decode.Extra.andMap (Json.Decode.field "ID" Json.Decode.int)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "IDM" Json.Decode.string)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
-                |> Json.Decode.Extra.andMap (Json.Decode.field "CREATED" Json.Decode.int)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "STATUS" Json.Decode.string)
-                |> Json.Decode.Extra.andMap (Json.Decode.field "COUNT" Json.Decode.int)
-
+                |> andMap (Json.Decode.field "ID" Json.Decode.int)
+                |> andMap (Json.Decode.field "IDM" Json.Decode.string)
+                |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
+                |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
+                |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
+                |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
+                |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
+                |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
+                |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
+                
         decoder =
             Json.Decode.list touchDecoder
-
-        andMap =
-            Procedure.map2 (|>)
 
         createdAt =
             String.fromInt millis
@@ -548,15 +559,19 @@ view model =
         viewLastFiveEnteredPeople : String -> Html msg
         viewLastFiveEnteredPeople data =
             li [] [ text <| "IDM : " ++ data ]
+    
+        maybeDefault : ({ b | count : a } -> a) -> String
+        maybeDefault count = 
+            String.fromInt((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count)
     in
     div [ id "body" ]
         [ div [] [ p [] [ text "Main" ] ]
         , div [] [ p [] [ text idmText ] ]
         , div [] [ p [] [ text <| formatTime model.lastTouchLog ] ]
         , div [] [ p [] [ text <| String.fromInt deposit ] ]
-        , div [] [ p [] [ text <| "Enter : " ++ String.fromInt(((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count + 1) // 2)  ++ " times "
-                        , text <| "Exit : "  ++ String.fromInt((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count // 2)  ++ " times "
-                        , text <| "Total Counts : " ++ String.fromInt(Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count ++ " times "
+        , div [] [ p [] [ text <| "Enter : " ++  maybeDefault .incount  ++ " times "
+                        , text <| "Exit : "  ++  maybeDefault .outcount  ++ " times "
+                        , text <| "Total Counts : " ++  maybeDefault .count  ++ " times "
                         ]]
         , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
                         , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
