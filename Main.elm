@@ -31,6 +31,16 @@ import Time.Format.Config.Config_ja_jp
 import TimeZone
 import WebSQL
 
+-- 練馬キッズの仕様は・・・ 
+-- １．入退室カウント（IDMユニーク）
+-- ２．カウントの表示位置は左上と右上
+-- ３．深夜０：００にリセット
+-- ってのが見た目の仕様で、裏方では
+-- ４．タッチされたらAPIコール（親御さんにメールがいく）
+-- ５．ハートビートと言われる定期APIコール（死活監視）
+-- ６．ネットワークにつながらない場合のタッチの再送（４を再度行う）
+-- ７．ネットワークエラーを認識してネットワークエラーがわかるようにする（以前はネットワークエラー画面表示。現状は仕様ドロップ）
+-- PitTouch -- 10秒以内に再タッチされた場合は退室としてカウントしない（一番最初の仕様）
 
 type Error
     = HttpError Http.Error
@@ -265,8 +275,30 @@ selectAllTouchCmd dbh =
 
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS, 0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT FROM TOUCH ORDER BY CREATED DESC;
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
+            0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT
+            FROM TOUCH ORDER BY CREATED DESC;
             """
+        
+        -- sql =
+        --     """
+        --     SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
+        --     0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT 
+        --     FROM TOUCH
+        --     GROUP BY IDM
+        --     ORDER BY CREATED DESC;
+        --     """
+
+        -- sql =
+        --     """
+        --     SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
+        --     count(idm) AS COUNT,
+        --     count(idm) / 2 AS INCOUNT,
+        --     (count(idm) + 1) / 2 AS OUTCOUNT 
+        --     FROM TOUCH
+        --     GROUP BY IDM
+        --     ORDER BY CREATED DESC;
+        --     """
 
         touchDecoder =
             Json.Decode.succeed TouchData
@@ -306,10 +338,22 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
             COUNT(IDM) / 2 AS INCOUNT,
             (COUNT(IDM) + 1) / 2 AS OUTCOUNT, 
             CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
-            CASE WHEN CREATED > ? + (10 * 1000) THEN 'TRUE' ElSE 'FALSE' END as STATUS,
+            CASE WHEN ? > (CREATED + (10 * 1000))  THEN 'TRUE' ElSE 'FALSE' END as STATUS,
             COUNT(IDM) as COUNT
-            FROM TOUCH WHERE IDM = idm;
+            FROM TOUCH WHERE IDM = ?
+            ORDER BY CREATED DESC
+            LIMIT 1;
             """
+
+        -- sql =
+        --     """
+        --     SELECT ID, IDM, ZONENAME, DATA, CREATED,
+        --     CASE WHEN ? > (CREATED + (10 * 1000)) THEN 'TRUE' ELSE 'FALSE' END as STATUS
+        --     FROM TOUCH
+        --     WHERE IDM = "idm3"
+        --     ORDER BY CREATED DESC
+        --     LIMIT 1;
+        --     """
 
         touchDecoder =
             Json.Decode.succeed TouchData
@@ -407,6 +451,7 @@ update msg model =
             )
 
         GotCurrentInOut touch zoneName millis touchLog ->
+            
             ( { model | touchLogWithCount = touchLog }
             , Just insertTouchCmd
                 |> Maybe.Extra.andMap touch.idm
@@ -415,7 +460,7 @@ update msg model =
                 |> Maybe.Extra.andMap (Just millis)
                 |> Maybe.Extra.andMap model.dbh
                 |> Maybe.withDefault Cmd.none
-                )
+            )
 
         GotSetting setting ->
             let
@@ -523,7 +568,6 @@ view model =
         
         -- 入退室カウント表示用 from DataBase
 
-
         entredNumbers : List TouchData -> String
         entredNumbers logs =
             groupEachIdm logs
@@ -560,9 +604,12 @@ view model =
         viewLastFiveEnteredPeople data =
             li [] [ text <| "IDM : " ++ data ]
     
-        maybeDefault : ({ b | count : a } -> a) -> String
-        maybeDefault count = 
-            String.fromInt((Maybe.withDefault defaultTouchLog (List.head model.touchLogWithCount)).count)
+        maybeDefault : (TouchData -> Int) -> String
+        maybeDefault cons = 
+            List.head model.touchLogWithCount
+            |> Maybe.withDefault defaultTouchLog
+            |> cons
+            |> String.fromInt
     in
     div [ id "body" ]
         [ div [] [ p [] [ text "Main" ] ]
