@@ -100,7 +100,6 @@ type alias TouchData =
     , zoneName : String     -- Zone
     , data : Maybe String   -- Icカードの残高
     , createdAt : Int       -- Posix(Int)
-    , status : String       -- 入室/退室しているか
     , count : Int           -- 入退室カウント用
     , incount : Int
     , outcount : Int
@@ -112,7 +111,6 @@ defaultTouchLog =
     , zoneName = ""
     , data = Nothing
     , createdAt = 0
-    , status = ""
     , count = 0
     , incount = 0
     , outcount = 0
@@ -275,30 +273,10 @@ selectAllTouchCmd dbh =
 
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
+            SELECT ID, IDM, ZONENAME, DATA, CREATED,
             0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT
             FROM TOUCH ORDER BY CREATED DESC;
             """
-        
-        -- sql =
-        --     """
-        --     SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
-        --     0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT 
-        --     FROM TOUCH
-        --     GROUP BY IDM
-        --     ORDER BY CREATED DESC;
-        --     """
-
-        -- sql =
-        --     """
-        --     SELECT ID, IDM, ZONENAME, DATA, CREATED, "Nothing" as STATUS,
-        --     count(idm) AS COUNT,
-        --     count(idm) / 2 AS INCOUNT,
-        --     (count(idm) + 1) / 2 AS OUTCOUNT 
-        --     FROM TOUCH
-        --     GROUP BY IDM
-        --     ORDER BY CREATED DESC;
-        --     """
 
         touchDecoder =
             Json.Decode.succeed TouchData
@@ -307,7 +285,6 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
                 |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
-                |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
                 |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
                 |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
                 |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
@@ -320,40 +297,36 @@ selectAllTouchCmd dbh =
         |> Procedure.try ProcMsg
             (Result.Extra.unpack (WebSQLError >> OnError) SQLAllTouch)
 
--- TouchData DataBase 操作関数
-
--- IDM, ZONENAME, CREATED, COUNT(IDM), STATUS(IN/OUT) つけてクエリしたやつ。IN/OUT が付くのでこの後自分で計算して出力する必要がない
--- SELECT IDM, ZONENAME, CREATED, CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as STATUS,
--- COUNT (IDM) as COUNT FROM TOUCH GROUP BY IDM;
-
-selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
-selectLatestRecordWithin10Secs dbh touch zoneName millis =
+-- TouchData DB操作関数
+selectLatestRecordWithin10Secs : String -> Int -> Int -> Task Http.Error (List TouchData)
+-- selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
+selectLatestRecordWithin10Secs dbh idm millis =
     let
         andMap =
             Json.Decode.Extra.andMap
 
         sql =
+            -- """
+            -- SELECT ID, IDM, ZONENAME, DATA, CREATED, 
+            -- COUNT(IDM) / 2 AS INCOUNT,
+            -- (COUNT(IDM) + 1) / 2 AS OUTCOUNT, 
+            -- CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
+            -- CASE WHEN ? > (CREATED + (10 * 1000))  THEN 'TRUE' ElSE 'FALSE' END as STATUS,
+            -- COUNT(IDM) as COUNT
+            -- FROM TOUCH WHERE IDM = ?
+            -- ORDER BY CREATED DESC
+            -- LIMIT 1;
+            -- """
+
             """
             SELECT ID, IDM, ZONENAME, DATA, CREATED, 
+            COUNT(IDM) as COUNT,
             COUNT(IDM) / 2 AS INCOUNT,
-            (COUNT(IDM) + 1) / 2 AS OUTCOUNT, 
-            CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
-            CASE WHEN ? > (CREATED + (10 * 1000))  THEN 'TRUE' ElSE 'FALSE' END as STATUS,
-            COUNT(IDM) as COUNT
-            FROM TOUCH WHERE IDM = ?
+            (COUNT(IDM) + 1) / 2 AS OUTCOUNT            
+            FROM TOUCH WHERE IDM = '?' AND ? < (CREATED + (10 * 1000))
             ORDER BY CREATED DESC
             LIMIT 1;
             """
-
-        -- sql =
-        --     """
-        --     SELECT ID, IDM, ZONENAME, DATA, CREATED,
-        --     CASE WHEN ? > (CREATED + (10 * 1000)) THEN 'TRUE' ELSE 'FALSE' END as STATUS
-        --     FROM TOUCH
-        --     WHERE IDM = "idm3"
-        --     ORDER BY CREATED DESC
-        --     LIMIT 1;
-        --     """
 
         touchDecoder =
             Json.Decode.succeed TouchData
@@ -362,7 +335,6 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
                 |> andMap (Json.Decode.field "ZONENAME" Json.Decode.string)
                 |> andMap (Json.Decode.field "DATA" (Json.Decode.maybe Json.Decode.string))
                 |> andMap (Json.Decode.field "CREATED" Json.Decode.int)
-                |> andMap (Json.Decode.field "STATUS" Json.Decode.string)
                 |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
                 |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
                 |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
@@ -373,11 +345,12 @@ selectLatestRecordWithin10Secs dbh touch zoneName millis =
         createdAt =
             String.fromInt millis
     in
-    WebSQL.querySQL decoder sql [ createdAt, (Maybe.withDefault "" touch.idm )] dbh
-        |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) (GotCurrentInOut touch zoneName millis))
+    -- WebSQL.querySQL decoder sql [ createdAt, (Maybe.withDefault "" touch.idm )] dbh
+    --     |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) (GotCurrentInOut touch zoneName millis))
+    WebSQL.querySQL decoder sql [ idm, createdAt ] dbh
+        |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) Identity)
+    
 
--- SELECT * FROM TOUCH ORDER BY CREATED [DESC] -- 最新のデータ
--- SELECT * FROM TOUCH WHERE CREATED >= 10秒プラスされた時刻
 
 
 -- UPDATE
@@ -428,12 +401,22 @@ update msg model =
                     TimeZone.getZone
                         |> Task.map (Just << Tuple.first)
                         |> Task.onError ((always << Task.succeed) Nothing)
+
+                millis = 
+                    Task.map Time.posixToMillis Time.now
             in
             ( model
-            , Task.succeed (OnTouchWithTime touch)
-                |> andMap getZoneName
-                |> andMap (Task.map Time.posixToMillis Time.now)
-                |> Task.perform identity
+            , Task.map2 Tuple.pair millis (selectLatestRecordWithin10Secs model.dbh (Maybe.withDefault "" touch.idm ) millis)
+                |> Task.map (\(millis, touchLog) -> OnTouchWithTime (touch, (getZoneName touch), millis, touchLog))
+                |> Task.perform OnError
+
+            , Task.map Time.posixToMillis Time.now
+                |> Task.andThen
+                    (\millis ->
+                        Task.map2 Tuple.pair (Task.succeed millis)(selectLatestRecordWithin10Secs model.dbh (Maybe.withDefault "" touch.idm ) millis)
+                            |> Task.map (\(millis, touchLog) -> OnTouchWithTime (touch, getZoneName, millis, touchLog))
+                            |> Task.perform OnError
+                    )
             )
 
         OnTouchWithTime touch zoneName millis ->
@@ -446,12 +429,10 @@ update msg model =
                     |> Maybe.Extra.andMap (Just zoneName)
                     |> Maybe.Extra.andMap (Just millis)
                     |> Maybe.withDefault Cmd.none
-                    -- touch以前で10秒以内があったら何もしない(touchの内容持ってってDB称号(Posix(ms - 10 * 1000)True False)touchの比較)
                 ]
             )
 
         GotCurrentInOut touch zoneName millis touchLog ->
-            
             ( { model | touchLogWithCount = touchLog }
             , Just insertTouchCmd
                 |> Maybe.Extra.andMap touch.idm
@@ -500,33 +481,6 @@ update msg model =
 -- VIEW
 
 
--- 入室、退室数計算 from DateBase
--- 入室、退室数計算
-groupEachIdm data =
-    Dict.Extra.groupBy .idm data
-        |> Dict.map (\_ v -> List.length v )
-{-| 
-@docs Dict [(idm, [{userTouchData}])]
-@docs Dict [(idm, dataLength)]
--}
-     
-transformToCounts data =
-    Dict.map (\_ v -> (( v + 1 )//2, v//2)) data
-{-| 入退室カウント取得
-@docs Dict [(idm, (入室回数, 退室回数))]
- -}
-totalEntExiCount data =
-    Dict.values data
-        |> List.unzip
-        |> Tuple.mapBoth List.sum List.sum
-{-|
-@docs [(入室回数, 退室回数)]
-@docs ([入室回数], [退室回数])
-@docs (入室総数, 退室総数)
- -}
-
-
-
 formatTime : Maybe TouchData -> String
 formatTime lastTouchLog =
     let
@@ -566,23 +520,22 @@ view model =
                 |> Maybe.andThen (Bytes.Decode.decode (Bytes.Decode.unsignedInt16 Bytes.LE))
                 |> Maybe.withDefault 0
         
-        -- 入退室カウント表示用 from DataBase
+        -- 入退室カウント表示用 from DB
+        -- entredNumbers : List TouchData -> String
+        -- entredNumbers logs =
+        --     groupEachIdm logs
+        --         |> transformToCounts
+        --         |> totalEntExiCount
+        --         |> Tuple.first
+        --         |> String.fromInt
 
-        entredNumbers : List TouchData -> String
-        entredNumbers logs =
-            groupEachIdm logs
-                |> transformToCounts
-                |> totalEntExiCount
-                |> Tuple.first
-                |> String.fromInt
-
-        exitedNumbers : List TouchData -> String
-        exitedNumbers data =
-            groupEachIdm data
-                |> transformToCounts
-                |> totalEntExiCount
-                |> Tuple.second
-                |> String.fromInt
+        -- exitedNumbers : List TouchData -> String
+        -- exitedNumbers data =
+        --     groupEachIdm data
+        --         |> transformToCounts
+        --         |> totalEntExiCount
+        --         |> Tuple.second
+        --         |> String.fromInt
 
         viewTouchData : Maybe TouchData -> Html msg
         viewTouchData maybeData =
@@ -591,14 +544,14 @@ view model =
             in
             li [] [ text <| "IDM : " ++ data.idm ++ " TIME : " ++ (formatTime maybeData) ]
 
-        lastFiveEnteredPeople : List TouchData -> List String
-        lastFiveEnteredPeople data =
-            List.reverse data
-                |> groupEachIdm
-                |> Dict.toList
-                |> List.take 4
-                |> List.unzip
-                |> Tuple.first
+        -- lastFiveEnteredPeople : List TouchData -> List String
+        -- lastFiveEnteredPeople data =
+        --     List.reverse data
+        --         |> groupEachIdm
+        --         |> Dict.toList
+        --         |> List.take 4
+        --         |> List.unzip
+        --         |> Tuple.first
 
         viewLastFiveEnteredPeople : String -> Html msg
         viewLastFiveEnteredPeople data =
@@ -620,9 +573,9 @@ view model =
                         , text <| "Exit : "  ++  maybeDefault .outcount  ++ " times "
                         , text <| "Total Counts : " ++  maybeDefault .count  ++ " times "
                         ]]
-        , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
-                        , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
-        , div [] [ ul [] ( List.map viewLastFiveEnteredPeople (lastFiveEnteredPeople model.touchLogs)) ]
+        -- , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
+        --                 , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
+        -- , div [] [ ul [] ( List.map viewLastFiveEnteredPeople (lastFiveEnteredPeople model.touchLogs)) ]
         ]
 
 
