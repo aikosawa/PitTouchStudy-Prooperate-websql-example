@@ -57,7 +57,6 @@ type alias Setting =
 
 -- MAIN
 
-
 main : Program Flags Model Msg
 main =
     Browser.element
@@ -76,13 +75,11 @@ type Msg
     | SQLAllTouch (List TouchData)
     | OnError Error
     | OnTouch TouchResponse -- Time.Posix, Time.Zone の変換用分岐
-    | OnTouchWithTime TouchResponse (Maybe String) Int
-    | GotCurrentInOut TouchResponse (Maybe String) Int (List TouchData)
+    | OnTouchWithTime TouchResponse (Maybe String) Int (List TouchData)
 
 
 
 -- Application Model
-
 
 type alias Model =
     { procModel : Procedure.Program.Model Msg
@@ -122,7 +119,6 @@ type alias Flags =
 
 
 -- FUNCTIONS
-
 
 init : Flags -> ( Model, Cmd Msg )
 init _ =
@@ -265,6 +261,7 @@ dropTouchTableCmd dbh =
             (Result.Extra.unpack (OnError << WebSQLError) SQLDone)
 
 
+-- INCOUNT,OUTCOUNTをこっちで取る
 selectAllTouchCmd : String -> Cmd Msg
 selectAllTouchCmd dbh =
     let
@@ -274,7 +271,9 @@ selectAllTouchCmd dbh =
         sql =
             """
             SELECT ID, IDM, ZONENAME, DATA, CREATED,
-            0 AS COUNT, 0 AS INCOUNT, 0 AS OUTCOUNT
+            COUNT(IDM) as COUNT,
+            COUNT(IDM) / 2 AS INCOUNT,
+            (COUNT(IDM) + 1) / 2 AS OUTCOUNT
             FROM TOUCH ORDER BY CREATED DESC;
             """
 
@@ -298,31 +297,27 @@ selectAllTouchCmd dbh =
             (Result.Extra.unpack (WebSQLError >> OnError) SQLAllTouch)
 
 -- TouchData DB操作関数
-selectLatestRecordWithin10Secs : String -> Int -> Int -> Task Http.Error (List TouchData)
--- selectLatestRecordWithin10Secs : String -> TouchResponse -> Maybe String -> Int -> Cmd Msg
-selectLatestRecordWithin10Secs dbh idm millis =
+-- タッチした時刻から10秒以内のレコードがあるかどうかの関数 → ない場合は空のリストで返ってくる
+selectWithin10Secs : String -> String -> Int -> Task Http.Error (List TouchData)
+selectWithin10Secs dbh idm millis =
     let
         andMap =
             Json.Decode.Extra.andMap
 
-        sql =
-            -- """
-            -- SELECT ID, IDM, ZONENAME, DATA, CREATED, 
-            -- COUNT(IDM) / 2 AS INCOUNT,
-            -- (COUNT(IDM) + 1) / 2 AS OUTCOUNT, 
-            -- CASE WHEN COUNT(IDM) % 2 = 0 THEN 'OUT' ELSE 'IN' END as INOUT,
-            -- CASE WHEN ? > (CREATED + (10 * 1000))  THEN 'TRUE' ElSE 'FALSE' END as STATUS,
-            -- COUNT(IDM) as COUNT
-            -- FROM TOUCH WHERE IDM = ?
-            -- ORDER BY CREATED DESC
-            -- LIMIT 1;
-            -- """
+        -- sql =
+        --     """
+        --     SELECT ID, IDM, ZONENAME, DATA, CREATED, 
+        --     COUNT(IDM) as COUNT,
+        --     COUNT(IDM) / 2 AS INCOUNT,
+        --     (COUNT(IDM) + 1) / 2 AS OUTCOUNT            
+        --     FROM TOUCH WHERE IDM = '?' AND ? < (CREATED + (10 * 1000))
+        --     ORDER BY CREATED DESC
+        --     LIMIT 1; 
+        --     """
 
+        sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED, 
-            COUNT(IDM) as COUNT,
-            COUNT(IDM) / 2 AS INCOUNT,
-            (COUNT(IDM) + 1) / 2 AS OUTCOUNT            
+            SELECT ID, IDM, ZONENAME, DATA, CREATED      
             FROM TOUCH WHERE IDM = '?' AND ? < (CREATED + (10 * 1000))
             ORDER BY CREATED DESC
             LIMIT 1;
@@ -345,16 +340,12 @@ selectLatestRecordWithin10Secs dbh idm millis =
         createdAt =
             String.fromInt millis
     in
-    -- WebSQL.querySQL decoder sql [ createdAt, (Maybe.withDefault "" touch.idm )] dbh
-    --     |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) (GotCurrentInOut touch zoneName millis))
-    WebSQL.querySQL decoder sql [ idm, createdAt ] dbh
-        |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) Identity)
-    
+    WebSQL.querySQL decoder sql [ createdAt, (Maybe.withDefault "" touch.idm )] dbh
+        |> Procedure.try ProcMsg (Result.Extra.unpack (WebSQLError >> OnError) (GotCurrentInOut touch zoneName millis))
 
 
 
 -- UPDATE
-
 
 filterTouchLogsByIdm : String -> List TouchData -> List TouchData
 filterTouchLogsByIdm idm =
@@ -394,53 +385,43 @@ update msg model =
 
         OnTouch touch ->
             let
-                andMap =
-                    Task.Extra.andMap
+                -- andMap =
+                --     Task.Extra.andMap
 
-                getZoneName =
-                    TimeZone.getZone
-                        |> Task.map (Just << Tuple.first)
-                        |> Task.onError ((always << Task.succeed) Nothing)
+                -- getZoneName =
+                --     TimeZone.getZone
+                --         |> Task.map (Just << Tuple.first)
+                --         |> Task.onError ((always << Task.succeed) Nothing)
 
-                millis = 
+                millis =
                     Task.map Time.posixToMillis Time.now
             in
+            -- ( model
+            -- , Task.succeed (OnTouchWithTime touch)
+            --     |> andMap getZoneName
+            --     |> andMap millis
+            --     |> andMap (selectWithin10Secs (Maybe.withDefault "" model.dbh) (Maybe.withDefault "" touch.idm) (Task.andThen millis))
+            --     |> Task.perform identity
+            -- )
+            -- ProcedureはandThenを持ってるので合成できると記憶してる。必要なSQLを発行してデコードするProcedureをつくって合成したら一撃で取得できるかと。
+            -- あとCREATEDはなんでエラーにならんのだろね。
+            -- MAXしてるのにw
             ( model
-            , Task.map2 Tuple.pair millis (selectLatestRecordWithin10Secs model.dbh (Maybe.withDefault "" touch.idm ) millis)
-                |> Task.map (\(millis, touchLog) -> OnTouchWithTime (touch, (getZoneName touch), millis, touchLog))
-                |> Task.perform OnError
-
-            , Task.map Time.posixToMillis Time.now
-                |> Task.andThen
-                    (\millis ->
-                        Task.map2 Tuple.pair (Task.succeed millis)(selectLatestRecordWithin10Secs model.dbh (Maybe.withDefault "" touch.idm ) millis)
-                            |> Task.map (\(millis, touchLog) -> OnTouchWithTime (touch, getZoneName, millis, touchLog))
-                            |> Task.perform OnError
-                    )
+            , Just selectWithin10Secs
+                |> Maybe.Extra.andMap (Maybe.withDefault "" model.dbh)
+                |> Maybe.Extra.andMap (Maybe.withDefault "" touch.idm)
+                |> Maybe.andThen millis
             )
 
-        OnTouchWithTime touch zoneName millis ->
-            ( model
-            , Cmd.batch
-                [ observeTouchCmd model.config
-                , Just selectLatestRecordWithin10Secs 
-                    |> Maybe.Extra.andMap model.dbh
-                    |> Maybe.Extra.andMap (Just touch)
-                    |> Maybe.Extra.andMap (Just zoneName)
+        OnTouchWithTime touch zoneName millis touchLog ->
+            ( { model| touchLogWithCount = touchLog }
+                , Just insertTouchCmd
+                    |> Maybe.Extra.andMap touch.idm
+                    |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
+                    |> Maybe.Extra.andMap zoneName
                     |> Maybe.Extra.andMap (Just millis)
+                    |> Maybe.Extra.andMap model.dbh
                     |> Maybe.withDefault Cmd.none
-                ]
-            )
-
-        GotCurrentInOut touch zoneName millis touchLog ->
-            ( { model | touchLogWithCount = touchLog }
-            , Just insertTouchCmd
-                |> Maybe.Extra.andMap touch.idm
-                |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
-                |> Maybe.Extra.andMap zoneName
-                |> Maybe.Extra.andMap (Just millis)
-                |> Maybe.Extra.andMap model.dbh
-                |> Maybe.withDefault Cmd.none
             )
 
         GotSetting setting ->
@@ -474,12 +455,10 @@ update msg model =
             , Maybe.map selectAllTouchCmd model.dbh
                 |> Maybe.withDefault Cmd.none
             )
-            
 
 
 
 -- VIEW
-
 
 formatTime : Maybe TouchData -> String
 formatTime lastTouchLog =
@@ -519,23 +498,6 @@ view model =
                 |> Maybe.andThen Hex.Convert.toBytes
                 |> Maybe.andThen (Bytes.Decode.decode (Bytes.Decode.unsignedInt16 Bytes.LE))
                 |> Maybe.withDefault 0
-        
-        -- 入退室カウント表示用 from DB
-        -- entredNumbers : List TouchData -> String
-        -- entredNumbers logs =
-        --     groupEachIdm logs
-        --         |> transformToCounts
-        --         |> totalEntExiCount
-        --         |> Tuple.first
-        --         |> String.fromInt
-
-        -- exitedNumbers : List TouchData -> String
-        -- exitedNumbers data =
-        --     groupEachIdm data
-        --         |> transformToCounts
-        --         |> totalEntExiCount
-        --         |> Tuple.second
-        --         |> String.fromInt
 
         viewTouchData : Maybe TouchData -> Html msg
         viewTouchData maybeData =
@@ -543,15 +505,6 @@ view model =
                 data = Maybe.withDefault defaultTouchLog maybeData
             in
             li [] [ text <| "IDM : " ++ data.idm ++ " TIME : " ++ (formatTime maybeData) ]
-
-        -- lastFiveEnteredPeople : List TouchData -> List String
-        -- lastFiveEnteredPeople data =
-        --     List.reverse data
-        --         |> groupEachIdm
-        --         |> Dict.toList
-        --         |> List.take 4
-        --         |> List.unzip
-        --         |> Tuple.first
 
         viewLastFiveEnteredPeople : String -> Html msg
         viewLastFiveEnteredPeople data =
@@ -573,15 +526,11 @@ view model =
                         , text <| "Exit : "  ++  maybeDefault .outcount  ++ " times "
                         , text <| "Total Counts : " ++  maybeDefault .count  ++ " times "
                         ]]
-        -- , div [] [ p [] [ text <| "Entred People : " ++ entredNumbers model.touchLogs ++ " times "
-        --                 , text <| "Exited People : " ++ exitedNumbers model.touchLogs ++ " times "]]
-        -- , div [] [ ul [] ( List.map viewLastFiveEnteredPeople (lastFiveEnteredPeople model.touchLogs)) ]
         ]
 
 
 
 -- SUBSCRIPTIONS
-
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
