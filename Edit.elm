@@ -28,6 +28,16 @@ import Time.Format.Config.Config_ja_jp as TimeFormatConfig
 import TimeZone
 import WebSQL
 
+-- 練馬キッズの仕様は・・・ 
+-- １．入退室カウント（IDMユニーク）
+-- ２．カウントの表示位置は左上と右上
+-- ３．深夜０：００にリセット
+-- ってのが見た目の仕様で、裏方では
+-- ４．タッチされたらAPIコール（親御さんにメールがいく）
+-- ５．ハートビートと言われる定期APIコール（死活監視）
+-- ６．ネットワークにつながらない場合のタッチの再送（４を再度行う）
+-- ７．ネットワークエラーを認識してネットワークエラーがわかるようにする（以前はネットワークエラー画面表示。現状は仕様ドロップ）
+-- PitTouch -- 10秒以内に再タッチされた場合は退室としてカウントしない（一番最初の仕様）
 
 type Error
     = HttpError Http.Error
@@ -47,15 +57,6 @@ type alias Touch =
     , zoneName : String
     , data : Maybe String
     , createdAt : Int
-    }
-
-
-defaultTouch =
-    { id = 0
-    , idm = ""
-    , zoneName = ""
-    , data = Nothing
-    , createdAt = 0
     }
 
 
@@ -82,8 +83,6 @@ type Msg
     | OnError Error
     | OnTouch TouchResponse
     | OnTouchWithTime TouchResponse (Maybe String) Time.Posix
-    | GotLatestTouch (List Touch)
-    | StartPolling
 
 
 
@@ -96,11 +95,8 @@ type alias Model =
     , dbh : Maybe String
     , touches : List Touch
     , lastTouch : Maybe Touch
-    , zone : String
-    , posix : Time.Posix
-    , pendingTouch : Maybe TouchResponse
     }
-
+-- lastTouchいらない
 
 type alias Flags =
     {}
@@ -117,9 +113,6 @@ init _ =
       , dbh = Nothing
       , touches = []
       , lastTouch = Nothing
-      , zone = ""
-      , posix = Time.millisToPosix 0
-      , pendingTouch = Nothing
       }
     , getProviderSettingCmd
     )
@@ -256,6 +249,7 @@ dropTouchTableCmd dbh =
 
 selectAllTouchCmd : String -> Cmd Msg
 selectAllTouchCmd dbh =
+-- 削除、指定したIDMの全件取得関数に変更
     let
         andMap =
             Json.Decode.Extra.andMap
@@ -272,9 +266,6 @@ selectAllTouchCmd dbh =
                 |> andMap (Json.field "ZONENAME" Json.string)
                 |> andMap (Json.field "DATA" (Json.maybe Json.string))
                 |> andMap (Json.field "CREATED" Json.int)
-                -- |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
-                -- |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
-                -- |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
 
         decoder =
             Json.list touchDecoder
@@ -284,39 +275,21 @@ selectAllTouchCmd dbh =
             (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
 
 
-selectLatestRecordCmd : String -> String -> Cmd Msg
-selectLatestRecordCmd dbh idm = 
+selectCurrentTimeParamResultCmd : String -> Int 
+selectCurrentTimeParamResultCmd idm millis = 
+-- タッチした時刻から10秒以内のレコードがあるかどうかの関数 → ない場合は空のリストで返ってくる
     let
-        andMap =
-            Json.Decode.Extra.andMap
-
         sql =
             """
-            SELECT ID, IDM, ZONENAME, DATA, CREATED
-            FROM TOUCH 
-            WHERE IDM = ?
+            SELECT ID, IDM, ZONENAME, DATA, CREATED      
+            FROM TOUCH WHERE IDM = ? AND (CREATED + (10 * 1000)) > ?
             ORDER BY CREATED DESC
             LIMIT 1;
             """
-
-        touchDecoder =
-            Json.succeed Touch
-                |> andMap (Json.field "ID" Json.int)
-                |> andMap (Json.field "IDM" Json.string)
-                |> andMap (Json.field "ZONENAME" Json.string)
-                |> andMap (Json.field "DATA" (Json.maybe Json.string))
-                |> andMap (Json.field "CREATED" Json.int)
-                -- |> andMap (Json.Decode.field "COUNT" Json.Decode.int)
-                -- |> andMap (Json.Decode.field "INCOUNT" Json.Decode.int)
-                -- |> andMap (Json.Decode.field "OUTCOUNT" Json.Decode.int)
-
-        decoder =
-            Json.list touchDecoder
     in
-    WebSQL.querySQL decoder sql [ idm ] dbh
+    WebSQL.querySQL decoder sql [ idm, millis ] dbh
         |> Procedure.try ProcMsg
-            (Result.Extra.unpack (OnError << WebSQLError) GotLatestTouch)
-
+            (Result.Extra.unpack (OnError << WebSQLError) SQLAllTouch)
 
 
 
@@ -361,39 +334,28 @@ update msg model =
                 |> Task.perform identity
             )
 
+            -- 10秒以内あるかどうか分岐 touch zoneName posix ->
+            -- IDMとPOSIX使ってDB SELECT
+            -- (model | posix = posix, zone = zoneName)
+            """
+            SELECT ID, IDM, ZONENAME, DATA, CREATED      
+            FROM TOUCH WHERE IDM = "010101124e14d228" AND (CREATED + (10 * 1000)) > 1671684015469
+            ORDER BY CREATED DESC
+            LIMIT 1;
+            """
+            -- touch zoneName posix
+
         OnTouchWithTime touch zoneName posix ->
-            ( { model | zone = Maybe.withDefault "" zoneName
-                      , posix = posix
-                      , pendingTouch = (Just touch)
-            }, selectLatestRecordCmd ( Maybe.withDefault "" model.dbh) ( Maybe.withDefault "" touch.idm )
-            )
-
-        GotLatestTouch touches ->
-            let
-                latest : Touch
-                latest = 
-                    Maybe.withDefault defaultTouch (List.head touches)
-
-                posix : Int
-                posix = 
-                    Time.posixToMillis model.posix
-
-                runSQL = 
-                    if (latest.createdAt + (10 * 1000)) < posix
-                        then Just insertTouchCmd
-                            |> Maybe.Extra.andMap (Just latest.idm)
-                            |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") latest.data)
-                            |> Maybe.Extra.andMap (Just model.zone)
-                            |> Maybe.Extra.andMap (Just model.posix)
-                            |> Maybe.Extra.andMap model.dbh
-                            |> Maybe.withDefault Cmd.none
-                
-                    else Task.succeed (Maybe.withDefault "" model.dbh)
-                            |> Task.perform SQLDone
-            in
             ( model
-            , runSQL
+            , Just insertTouchCmd
+                |> Maybe.Extra.andMap touch.idm
+                |> Maybe.Extra.andMap (Maybe.Extra.orElse (Just "") touch.data)
+                |> Maybe.Extra.andMap zoneName
+                |> Maybe.Extra.andMap (Just posix)
+                |> Maybe.Extra.andMap model.dbh
+                |> Maybe.withDefault Cmd.none
             )
+            -- Maybe.unpack (問い合わせ結果) (Insert List Touch)
 
         GotSetting setting ->
             let
@@ -406,29 +368,36 @@ update msg model =
 
         GotDBHandle dbh ->
             ( { model | dbh = Just dbh }
-            , Task.succeed StartPolling
-                |> Task.perform identity
+            , Task.succeed dbh
+                |> Task.perform SQLDone
             )
 
         SQLAllTouch touches ->
+         -- SQLAllTouch なくしてよし、DBに問い合わせてカウント計算したものをここで上書き
             ( { model
                 | touches = touches
                 , lastTouch = List.head touches
               }
-            , Task.succeed StartPolling
-                |> Task.perform identity
+            , Cmd.none
             )
 
         SQLDone dbh ->
             ( model
-            , Maybe.map selectAllTouchCmd model.dbh
-                |> Maybe.withDefault Cmd.none
+            , Cmd.batch
+                [ observeTouchCmd model.config
+                , Maybe.map selectAllTouchCmd model.dbh
+                    |> Maybe.withDefault Cmd.none
+                ]
             )
+            """
+            selectIdmParamResultCmd
 
-        StartPolling ->
-            ( model
-            , observeTouchCmd model.config
-            )
+            SELECT ID, IDM, ZONENAME, DATA, CREATED, 
+            COUNT(IDM) as COUNT,
+            (COUNT(IDM) + 1) / 2 AS INCOUNT,
+            FLOOR(COUNT(IDM) / 2) AS OUTCOUNT
+            FROM TOUCH;
+            """
 
 
 

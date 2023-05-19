@@ -4,6 +4,9 @@ sequenceDiagram
     actor ユーザー
     participant pittouch as PitTouch
     participant db as DB
+    pittouch->>pittouch: 初期設定情報取得
+    pittouch->>db: テーブル作成
+    pittouch->>pittouch: タッチを一度だけ観測するためのポーリング開始
     ユーザー->>pittouch: タッチ
     Note left of pittouch: タッチデータ取得(TouchResponse)
     pittouch->>pittouch: Zone, Posix 計算
@@ -22,6 +25,7 @@ sequenceDiagram
     db->>pittouch: 検索結果を返す
     Note left of db: INCOUNT, OUTCOUNT, TOTALCOUNT をBDで計算
     pittouch->>ユーザー: IDM, 時間, 残金, 入室回数, 退室回数, 合計入退室回数 をユーザーへ表示
+    pittouch->>pittouch: タッチを一度だけ観測するためのポーリング開始
     
 
 %% ```mermaid
